@@ -1,5 +1,10 @@
 const User = require('./models/User');
 const Equipment = require('./models/Equipment');
+const Booking = require('./models/Booking');
+const Payment = require('./models/Payment');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
@@ -428,6 +433,211 @@ app.delete('/favorites/:equipmentId', verifyToken, verifyRenter, async (req, res
 });
 
 
+
+
+
+const calculateTotalAmount = (price, rentalType, startDate, endDate, quantity) => {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  const diffTime = Math.max(1, end - start);
+  const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+  let units = days; // default: Daily
+  if (rentalType === 'Weekly') units = Math.ceil(days / 7);
+  if (rentalType === 'Monthly') units = Math.ceil(days / 30);
+
+  return Math.max(1, units) * price * quantity;
+};
+
+
+
+app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
+  try {
+    const { equipmentId, startDate, endDate, quantity, contactNumber, address, notes } = req.body;
+
+    // 1. Check equipment & availability
+    const equipment = await Equipment.findById(equipmentId);
+    if (!equipment || equipment.status !== 'Approved') {
+      return res.status(404).send({ message: 'Equipment not available' });
+    }
+    if (equipment.quantity < quantity) {
+      return res.status(400).send({ message: `Only ${equipment.quantity} unit(s) available` });
+    }
+
+    // 2. Calculate total amount
+    const totalAmount = calculateTotalAmount(
+      equipment.price,
+      equipment.rentalType,
+      startDate,
+      endDate,
+      Number(quantity)
+    );
+
+    // 3. Create Pending Booking
+    const booking = await Booking.create({
+      equipment: equipment._id,
+      customer: req.user.userId,
+      owner: equipment.owner,
+      startDate,
+      endDate,
+      quantity: Number(quantity),
+      contactNumber,
+      address,
+      notes,
+      totalAmount,
+      paymentStatus: 'Pending',
+      bookingStatus: 'Pending',
+    });
+
+    // 4. Create Stripe Checkout Session
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'payment',
+      customer_email: req.user.email,
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: equipment.name,
+              description: `${equipment.rentalType} Rental (${quantity} unit)`,
+              images: equipment.image ? [equipment.image] : [],
+            },
+            unit_amount: Math.round(totalAmount * 100), // Stripe uses cents
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        bookingId: booking._id.toString(),
+        equipmentId: equipment._id.toString(),
+        customerId: req.user.userId.toString(),
+      },
+      success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_URL}/equipment/${equipment._id}?canceled=true`,
+    });
+
+    res.send({ url: session.url, bookingId: booking._id });
+  } catch (error) {
+    res.status(500).send({ message: 'Checkout failed', error: error.message });
+  }
+});
+
+
+
+app.post('/payments/confirm', verifyToken, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status !== 'paid') {
+      return res.status(400).send({ message: 'Payment not completed yet' });
+    }
+
+    const { bookingId, equipmentId, customerId } = session.metadata;
+    const transactionId = session.payment_intent || session.id;
+
+    // Prevent duplicate payment records on page reload
+    const existingPayment = await Payment.findOne({ transactionId });
+    if (existingPayment) {
+      const booking = await Booking.findById(bookingId).populate('equipment', 'name image');
+      return res.send({ success: true, payment: existingPayment, booking });
+    }
+
+    // 1. Update Booking status
+    const booking = await Booking.findByIdAndUpdate(
+      bookingId,
+      { paymentStatus: 'Paid', bookingStatus: 'Confirmed' },
+      { new: true }
+    ).populate('equipment', 'name image');
+
+    // 2. Reduce available equipment quantity
+    if (booking) {
+      await Equipment.findByIdAndUpdate(equipmentId, {
+        $inc: { quantity: -booking.quantity },
+      });
+    }
+
+    // 3. Save Payment record
+    const payment = await Payment.create({
+      bookingId,
+      transactionId,
+      amount: session.amount_total / 100,
+      customer: customerId,
+    });
+
+    res.send({ success: true, payment, booking });
+  } catch (error) {
+    res.status(500).send({ message: 'Payment confirmation failed', error: error.message });
+  }
+});
+
+
+
+
+app.get('/bookings/customer', verifyToken, verifyRenter, async (req, res) => {
+  try {
+    const bookings = await Booking.find({ customer: req.user.userId })
+      .populate('equipment', 'name image price rentalType')
+      .sort({ createdAt: -1 });
+    res.send(bookings);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch customer rentals' });
+  }
+});
+
+
+
+
+app.get('/bookings/owner', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const bookings = await Booking.find({ owner: req.user.userId })
+      .populate('equipment', 'name image price rentalType')
+      .populate('customer', 'name email phone')
+      .sort({ createdAt: -1 });
+    res.send(bookings);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch owner rentals' });
+  }
+});
+
+
+
+
+app.get('/bookings/admin', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const bookings = await Booking.find()
+      .populate('equipment', 'name image price rentalType')
+      .populate('customer', 'name email phone')
+      .populate('owner', 'name email')
+      .sort({ createdAt: -1 });
+    res.send(bookings);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch all rentals' });
+  }
+});
+
+
+
+
+app.patch('/bookings/status/:id', verifyToken, async (req, res) => {
+  try {
+    const { bookingStatus } = req.body;
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).send({ message: 'Booking not found' });
+
+    const isOwner = booking.owner.toString() === req.user.userId;
+    if (!isOwner && req.user.role !== 'Admin') {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+
+    booking.bookingStatus = bookingStatus;
+    await booking.save();
+    res.send(booking);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update booking status' });
+  }
+});
 
 
 
