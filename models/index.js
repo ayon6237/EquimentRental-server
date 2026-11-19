@@ -641,6 +641,116 @@ app.patch('/bookings/status/:id', verifyToken, async (req, res) => {
 
 
 
+
+
+app.get('/analytics/admin', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const [
+      totalUsers,
+      totalEquipment,
+      pendingApprovals,
+      totalBookings,
+      completedRentals,
+      revenueResult,
+      monthlyBookings,
+    ] = await Promise.all([
+      User.countDocuments(),
+      Equipment.countDocuments(),
+      Equipment.countDocuments({ status: 'Pending' }),
+      Booking.countDocuments(),
+      Booking.countDocuments({ bookingStatus: 'Completed' }),
+      Payment.aggregate([
+        { $group: { _id: null, totalRevenue: { $sum: '$amount' } } },
+      ]),
+      Booking.aggregate([
+        {
+          $group: {
+            _id: {
+              year: { $year: '$createdAt' },
+              month: { $month: '$createdAt' },
+            },
+            bookings: { $sum: 1 },
+            revenue: { $sum: '$totalAmount' },
+          },
+        },
+        { $sort: { '_id.year': 1, '_id.month': 1 } },
+      ]),
+    ]);
+
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const formattedMonthlyStats = monthlyBookings.map((item) => ({
+      month: `${monthNames[item._id.month - 1]} ${item._id.year}`,
+      bookings: item.bookings,
+      revenue: item.revenue,
+    }));
+
+    res.send({
+      totalUsers,
+      totalEquipment,
+      pendingApprovals,
+      totalBookings,
+      completedRentals,
+      totalRevenue: revenueResult[0]?.totalRevenue || 0,
+      monthlyStats: formattedMonthlyStats,
+    });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to load admin analytics', error: error.message });
+  }
+});
+
+
+
+app.get('/analytics/owner', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const ownerObjectId = new mongoose.Types.ObjectId(req.user.userId);
+
+    const [
+      totalListedEquipment,
+      completedRentals,
+      earningsResult,
+      monthlyEarnings,
+    ] = await Promise.all([
+      Equipment.countDocuments({ owner: ownerObjectId }),
+      Booking.countDocuments({ owner: ownerObjectId, bookingStatus: 'Completed' }),
+      Booking.aggregate([
+        { $match: { owner: ownerObjectId, paymentStatus: 'Paid' } },
+        { $group: { _id: null, totalEarnings: { $sum: '$totalAmount' } } },
+      ]),
+      Booking.aggregate([
+        { $match: { owner: ownerObjectId, paymentStatus: 'Paid' } },
+        {
+          $group: {
+            _id: {
+              year: { $year: '$createdAt' },
+              month: { $month: '$createdAt' },
+            },
+            earnings: { $sum: '$totalAmount' },
+            bookings: { $sum: 1 },
+          },
+        },
+        { $sort: { '_id.year': 1, '_id.month': 1 } },
+      ]),
+    ]);
+
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const formattedMonthlyEarnings = monthlyEarnings.map((item) => ({
+      month: `${monthNames[item._id.month - 1]} ${item._id.year}`,
+      earnings: item.earnings,
+      bookings: item.bookings,
+    }));
+
+    res.send({
+      totalListedEquipment,
+      completedRentals,
+      totalEarnings: earningsResult[0]?.totalEarnings || 0,
+      monthlyEarnings: formattedMonthlyEarnings,
+    });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to load owner analytics', error: error.message });
+  }
+});
+
+
 // Default Route
 app.get('/', (req, res) => res.send('Equipment Rental Server is Running...'));
 
