@@ -108,6 +108,18 @@ app.post('/users', async (req, res) => {
 
 
 
+app.get('/users/role/:email', async (req, res) => {
+  try {
+    const user = await User.findOne({ email: req.params.email }).select('-password');
+    if (!user) return res.status(404).send({ role: 'Customer' });
+    res.send({ role: user.role, user });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch role' });
+  }
+});
+
+
+
 
 // Default Route
 app.get('/', (req, res) => res.send('Equipment Rental Server is Running...'));
