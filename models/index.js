@@ -153,6 +153,24 @@ app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
 
 
 
+app.patch('/users/role/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { role } = req.body; // 'Customer', 'Owner', or 'Admin'
+    const updatedUser = await User.findByIdAndUpdate(
+      req.params.id,
+      { role },
+      { new: true }
+    ).select('-password');
+
+    res.send(updatedUser);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update role' });
+  }
+});
+
+
+
+
 // Default Route
 app.get('/', (req, res) => res.send('Equipment Rental Server is Running...'));
 
