@@ -86,6 +86,27 @@ app.post('/logout', (req, res) => {
 
 
 
+app.post('/users', async (req, res) => {
+  try {
+    const userData = req.body;
+    const existingUser = await User.findOne({ email: userData.email });
+    
+    if (existingUser) {
+      return res.send({ message: 'User already exists', user: existingUser });
+    }
+
+    const newUser = await User.create({
+      ...userData,
+      role: 'Customer'
+    });
+    res.status(201).send(newUser);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to save user', error: error.message });
+  }
+});
+
+
+
 
 
 // Default Route
