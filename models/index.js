@@ -141,6 +141,18 @@ app.patch('/users/profile/:email', verifyToken, async (req, res) => {
 
 
 
+app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const users = await User.find().select('-password').sort({ createdAt: -1 });
+    res.send(users);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch users' });
+  }
+});
+
+
+
+
 // Default Route
 app.get('/', (req, res) => res.send('Equipment Rental Server is Running...'));
 
