@@ -171,6 +171,18 @@ app.patch('/users/role/:id', verifyToken, verifyAdmin, async (req, res) => {
 
 
 
+app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    await User.findByIdAndDelete(req.params.id);
+    res.send({ success: true, message: 'User deleted successfully' });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to delete user' });
+  }
+});
+
+
+
+
 // Default Route
 app.get('/', (req, res) => res.send('Equipment Rental Server is Running...'));
 
