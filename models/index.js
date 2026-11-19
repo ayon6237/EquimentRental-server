@@ -1,4 +1,5 @@
 const User = require('./models/User');
+const Equipment = require('./models/Equipment');
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
@@ -179,6 +180,253 @@ app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
     res.status(500).send({ message: 'Failed to delete user' });
   }
 });
+
+//Equipment Routes
+
+
+app.get('/equipment/featured', async (req, res) => {
+  try {
+    const featured = await Equipment.find({ status: 'Approved' })
+      .sort({ createdAt: -1 })
+      .limit(6)
+      .populate('owner', 'name email photo');
+    res.send(featured);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch featured equipment' });
+  }
+});
+
+
+
+app.get('/equipment', async (req, res) => {
+  try {
+    const {
+      search = '',
+      category = '',
+      rentalType = '',
+      minPrice,
+      maxPrice,
+      availability = '',
+      sort = 'newest',
+      page = 1,
+      limit = 9,
+    } = req.query;
+
+    const query = { status: 'Approved' };
+
+    // Search by Equipment Name, Location, or Category
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { location: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    // Filter by Category & Rental Type
+    if (category && category !== 'All') query.category = category;
+    if (rentalType && rentalType !== 'All') query.rentalType = rentalType;
+
+    // Filter by Price Range
+    if (minPrice || maxPrice) {
+      query.price = {};
+      if (minPrice) query.price.$gte = Number(minPrice);
+      if (maxPrice) query.price.$lte = Number(maxPrice);
+    }
+
+    // Filter by Availability
+    if (availability === 'available') {
+      query.quantity = { $gt: 0 };
+    } else if (availability === 'unavailable') {
+      query.quantity = { $lte: 0 };
+    }
+
+    // Sorting
+    let sortOption = { createdAt: -1 }; // default: Recently Added
+    if (sort === 'price_asc') sortOption = { price: 1 };
+    if (sort === 'price_desc') sortOption = { price: -1 };
+
+    // Pagination
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.max(1, parseInt(limit));
+    const skip = (pageNum - 1) * limitNum;
+
+    const [items, total] = await Promise.all([
+      Equipment.find(query)
+        .populate('owner', 'name email photo')
+        .sort(sortOption)
+        .skip(skip)
+        .limit(limitNum),
+      Equipment.countDocuments(query),
+    ]);
+
+    res.send({
+      data: items,
+      total,
+      page: pageNum,
+      totalPages: Math.ceil(total / limitNum),
+    });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch equipment', error: error.message });
+  }
+});
+
+
+
+
+app.get('/equipment/:id', verifyToken, async (req, res) => {
+  try {
+    const item = await Equipment.findById(req.params.id).populate('owner', 'name email photo phone address');
+    if (!item) return res.status(404).send({ message: 'Equipment not found' });
+    res.send(item);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch equipment details' });
+  }
+});
+
+// Add New Equipment (Owner Only - Default Status: Pending)
+app.post('/equipment', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const equipmentData = {
+      ...req.body,
+      owner: req.user.userId,
+      status: 'Pending',
+    };
+    const newItem = await Equipment.create(equipmentData);
+    res.status(201).send(newItem);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to add equipment', error: error.message });
+  }
+});
+
+
+
+app.get('/owner/equipment', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const items = await Equipment.find({ owner: req.user.userId }).sort({ createdAt: -1 });
+    res.send(items);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch your equipment' });
+  }
+});
+
+
+
+
+app.get('/admin/equipment', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const items = await Equipment.find()
+      .populate('owner', 'name email')
+      .sort({ createdAt: -1 });
+    res.send(items);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch all equipment' });
+  }
+});
+
+
+
+
+app.patch('/equipment/status/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { status } = req.body; // 'Approved' or 'Rejected'
+    const updated = await Equipment.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    );
+    res.send(updated);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update equipment status' });
+  }
+});
+
+
+
+
+app.patch('/equipment/:id', verifyToken, async (req, res) => {
+  try {
+    const item = await Equipment.findById(req.params.id);
+    if (!item) return res.status(404).send({ message: 'Equipment not found' });
+
+    const isOwner = item.owner.toString() === req.user.userId;
+    if (!isOwner && req.user.role !== 'Admin') {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+
+    const updated = await Equipment.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    res.send(updated);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update equipment' });
+  }
+});
+
+
+
+
+app.delete('/equipment/:id', verifyToken, async (req, res) => {
+  try {
+    const item = await Equipment.findById(req.params.id);
+    if (!item) return res.status(404).send({ message: 'Equipment not found' });
+
+    const isOwner = item.owner.toString() === req.user.userId;
+    if (!isOwner && req.user.role !== 'Admin') {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+
+    await Equipment.findByIdAndDelete(req.params.id);
+    res.send({ success: true, message: 'Equipment deleted successfully' });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to delete equipment' });
+  }
+});
+
+
+
+
+
+app.get('/favorites', verifyToken, verifyRenter, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).populate('favorites');
+    res.send(user?.favorites || []);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch favorites' });
+  }
+});
+
+
+
+
+
+app.post('/favorites/:equipmentId', verifyToken, verifyRenter, async (req, res) => {
+  try {
+    const user = await User.findByIdAndUpdate(
+      req.user.userId,
+      { $addToSet: { favorites: req.params.equipmentId } }, // prevents duplicates
+      { new: true }
+    ).populate('favorites');
+    res.send(user.favorites);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to add to favorites' });
+  }
+});
+
+
+
+
+app.delete('/favorites/:equipmentId', verifyToken, verifyRenter, async (req, res) => {
+  try {
+    const user = await User.findByIdAndUpdate(
+      req.user.userId,
+      { $pull: { favorites: req.params.equipmentId } },
+      { new: true }
+    ).populate('favorites');
+    res.send(user.favorites);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to remove from favorites' });
+  }
+});
+
 
 
 
