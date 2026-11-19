@@ -120,6 +120,26 @@ app.get('/users/role/:email', async (req, res) => {
 
 
 
+app.patch('/users/profile/:email', verifyToken, async (req, res) => {
+  try {
+    if (req.user.email !== req.params.email) {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+    const { name, photo, phone, address } = req.body;
+    const updatedUser = await User.findOneAndUpdate(
+      { email: req.params.email },
+      { name, photo, phone, address },
+      { new: true }
+    ).select('-password');
+
+    res.send(updatedUser);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update profile' });
+  }
+});
+
+
+
 
 // Default Route
 app.get('/', (req, res) => res.send('Equipment Rental Server is Running...'));
