@@ -1,3 +1,6 @@
+require('dotenv').config();
+
+
 const User = require('./models/User');
 const Equipment = require('./models/Equipment');
 const Booking = require('./models/Booking');
@@ -5,19 +8,20 @@ const Payment = require('./models/Payment');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 
+
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
-require('dotenv').config();
+
 
 const app = express();
 const port = process.env.PORT || 5000;
 
 // Basic Middlewares
 app.use(cors({
-  origin: ['http://localhost:3000'], 
+  origin: ['http://localhost:3000',process.env.CLIENT_URL], 
   credentials: true
 }));
 app.use(express.json());
@@ -491,7 +495,6 @@ app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
 
     // 4. Create Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
       mode: 'payment',
       customer_email: req.user.email,
       line_items: [
@@ -501,9 +504,9 @@ app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
             product_data: {
               name: equipment.name,
               description: `${equipment.rentalType} Rental (${quantity} unit)`,
-              images: equipment.image ? [equipment.image] : [],
+              images: equipment.image?.startsWith('http') ? [equipment.image] : [],
             },
-            unit_amount: Math.round(totalAmount * 100), // Stripe uses cents
+            unit_amount: Math.round(totalAmount * 100),
           },
           quantity: 1,
         },
@@ -518,8 +521,9 @@ app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
     });
 
     res.send({ url: session.url, bookingId: booking._id });
-  } catch (error) {
-    res.status(500).send({ message: 'Checkout failed', error: error.message });
+  }  catch (error) {
+    console.error("❌ Stripe Checkout Error:", error.message);
+    res.status(500).send({ message: error.message || 'Checkout failed' });
   }
 });
 
