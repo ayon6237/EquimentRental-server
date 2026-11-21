@@ -1,122 +1,158 @@
 require('dotenv').config();
 
-
-const User = require('./models/User');
-const Equipment = require('./models/Equipment');
-const Booking = require('./models/Booking');
-const Payment = require('./models/Payment');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-
-
-
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+const User = require('./models/User');
+const Equipment = require('./models/Equipment');
+const Booking = require('./models/Booking');
+const Payment = require('./models/Payment');
 
 const app = express();
 const port = process.env.PORT || 5000;
 
+const isProd = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+const clientUrl = (process.env.CLIENT_URL || 'http://localhost:3000').replace(/\/$/, '');
+
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://my-app-azure-gamma-33.vercel.app',
+  clientUrl,
+].filter(Boolean);
+
+const cookieOptions = {
+  httpOnly: true,
+  secure: isProd,
+  sameSite: isProd ? 'none' : 'lax',
+};
+
 // Basic Middlewares
-app.use(cors({
-  origin: ['http://localhost:3000',process.env.CLIENT_URL], 
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ''))) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked for origin: ${origin}`));
+      }
+    },
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
 app.use(express.json());
 app.use(cookieParser());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log("✅ MongoDB Connected Successfully!"))
-  .catch(err => console.log("❌ MongoDB Connection Error:", err));
+// Serverless-Safe MongoDB Connection
+let cachedConnection = null;
 
+async function connectDB() {
+  if (cachedConnection && mongoose.connection.readyState === 1) {
+    return cachedConnection;
+  }
+  cachedConnection = await mongoose.connect(process.env.MONGODB_URI, {
+    bufferCommands: false,
+    serverSelectionTimeoutMS: 5000,
+  });
+  console.log('✅ MongoDB Connected Successfully!');
+  return cachedConnection;
+}
 
+// Ensure DB is connected before every route
+app.use(async (req, res, next) => {
+  if (req.path === '/') return next();
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('❌ MongoDB Connection Error:', err.message);
+    res.status(500).send({ message: 'Database connection failed', error: err.message });
+  }
+});
+
+// Auth Middlewares
 const verifyToken = (req, res, next) => {
-  const token = req.cookies?.token || req.headers?.authorization?.split(' ')[1];
+  const authHeader = req.headers?.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
+  const token = bearerToken || req.cookies?.token;
+
   if (!token) return res.status(401).send({ message: 'Unauthorized access' });
 
   jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
     if (err) return res.status(401).send({ message: 'Unauthorized access' });
-    req.user = decoded; 
+    req.user = decoded;
     next();
   });
 };
 
-const verifyRenter = async (req, res, next) => {
-  if (req.user.role !== 'Customer') return res.status(403).send({ message: 'Forbidden access! Customer only.' });
+const verifyRenter = (req, res, next) => {
+  if (req.user.role !== 'Customer') {
+    return res.status(403).send({ message: 'Forbidden access! Customer only.' });
+  }
   next();
 };
 
-const verifyOwner = async (req, res, next) => {
-  if (req.user.role !== 'Owner') return res.status(403).send({ message: 'Forbidden access! Owner only.' });
+const verifyOwner = (req, res, next) => {
+  if (req.user.role !== 'Owner') {
+    return res.status(403).send({ message: 'Forbidden access! Owner only.' });
+  }
   next();
 };
 
-const verifyAdmin = async (req, res, next) => {
-  if (req.user.role !== 'Admin') return res.status(403).send({ message: 'Forbidden access! Admin only.' });
+const verifyAdmin = (req, res, next) => {
+  if (req.user.role !== 'Admin') {
+    return res.status(403).send({ message: 'Forbidden access! Admin only.' });
+  }
   next();
 };
 
-
+// ================= AUTH & USER ROUTES =================
 
 app.post('/jwt', async (req, res) => {
   try {
     const { email } = req.body;
     const user = await User.findOne({ email });
-    
+
     const payload = {
       email,
       role: user ? user.role : 'Customer',
-      userId: user ? user._id : null
+      userId: user ? user._id : null,
     };
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
-    }).send({ success: true, token });
+    res.cookie('token', token, cookieOptions).send({ success: true, token });
   } catch (error) {
     res.status(500).send({ message: 'Failed to generate token', error: error.message });
   }
 });
 
-
-
 app.post('/logout', (req, res) => {
-  res.clearCookie('token', {
-    maxAge: 0,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
-  }).send({ success: true });
+  res.clearCookie('token', cookieOptions).send({ success: true });
 });
-
-
 
 app.post('/users', async (req, res) => {
   try {
     const userData = req.body;
     const existingUser = await User.findOne({ email: userData.email });
-    
+
     if (existingUser) {
       return res.send({ message: 'User already exists', user: existingUser });
     }
 
     const newUser = await User.create({
       ...userData,
-      role: 'Customer'
+      role: 'Customer',
     });
     res.status(201).send(newUser);
   } catch (error) {
     res.status(500).send({ message: 'Failed to save user', error: error.message });
   }
 });
-
-
-
 
 app.get('/users/role/:email', async (req, res) => {
   try {
@@ -127,8 +163,6 @@ app.get('/users/role/:email', async (req, res) => {
     res.status(500).send({ message: 'Failed to fetch role' });
   }
 });
-
-
 
 app.patch('/users/profile/:email', verifyToken, async (req, res) => {
   try {
@@ -148,9 +182,6 @@ app.patch('/users/profile/:email', verifyToken, async (req, res) => {
   }
 });
 
-
-
-
 app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const users = await User.find().select('-password').sort({ createdAt: -1 });
@@ -159,9 +190,6 @@ app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
     res.status(500).send({ message: 'Failed to fetch users' });
   }
 });
-
-
-
 
 app.patch('/users/role/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
@@ -178,9 +206,6 @@ app.patch('/users/role/:id', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
-
-
-
 app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     await User.findByIdAndDelete(req.params.id);
@@ -190,8 +215,7 @@ app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
-//Equipment Routes
-
+// ================= EQUIPMENT ROUTES =================
 
 app.get('/equipment/featured', async (req, res) => {
   try {
@@ -204,8 +228,6 @@ app.get('/equipment/featured', async (req, res) => {
     res.status(500).send({ message: 'Failed to fetch featured equipment' });
   }
 });
-
-
 
 app.get('/equipment', async (req, res) => {
   try {
@@ -223,7 +245,6 @@ app.get('/equipment', async (req, res) => {
 
     const query = { status: 'Approved' };
 
-    // Search by Equipment Name, Location, or Category
     if (search) {
       query.$or = [
         { name: { $regex: search, $options: 'i' } },
@@ -232,30 +253,25 @@ app.get('/equipment', async (req, res) => {
       ];
     }
 
-    // Filter by Category & Rental Type
     if (category && category !== 'All') query.category = category;
     if (rentalType && rentalType !== 'All') query.rentalType = rentalType;
 
-    // Filter by Price Range
     if (minPrice || maxPrice) {
       query.price = {};
       if (minPrice) query.price.$gte = Number(minPrice);
       if (maxPrice) query.price.$lte = Number(maxPrice);
     }
 
-    // Filter by Availability
     if (availability === 'available') {
       query.quantity = { $gt: 0 };
     } else if (availability === 'unavailable') {
       query.quantity = { $lte: 0 };
     }
 
-    // Sorting
-    let sortOption = { createdAt: -1 }; // default: Recently Added
+    let sortOption = { createdAt: -1 };
     if (sort === 'price_asc') sortOption = { price: 1 };
     if (sort === 'price_desc') sortOption = { price: -1 };
 
-    // Pagination
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.max(1, parseInt(limit));
     const skip = (pageNum - 1) * limitNum;
@@ -280,9 +296,6 @@ app.get('/equipment', async (req, res) => {
   }
 });
 
-
-
-
 app.get('/equipment/:id', verifyToken, async (req, res) => {
   try {
     const item = await Equipment.findById(req.params.id).populate('owner', 'name email photo phone address');
@@ -293,7 +306,6 @@ app.get('/equipment/:id', verifyToken, async (req, res) => {
   }
 });
 
-// Add New Equipment (Owner Only - Default Status: Pending)
 app.post('/equipment', verifyToken, verifyOwner, async (req, res) => {
   try {
     const equipmentData = {
@@ -308,8 +320,6 @@ app.post('/equipment', verifyToken, verifyOwner, async (req, res) => {
   }
 });
 
-
-
 app.get('/owner/equipment', verifyToken, verifyOwner, async (req, res) => {
   try {
     const items = await Equipment.find({ owner: req.user.userId }).sort({ createdAt: -1 });
@@ -318,9 +328,6 @@ app.get('/owner/equipment', verifyToken, verifyOwner, async (req, res) => {
     res.status(500).send({ message: 'Failed to fetch your equipment' });
   }
 });
-
-
-
 
 app.get('/admin/equipment', verifyToken, verifyAdmin, async (req, res) => {
   try {
@@ -332,9 +339,6 @@ app.get('/admin/equipment', verifyToken, verifyAdmin, async (req, res) => {
     res.status(500).send({ message: 'Failed to fetch all equipment' });
   }
 });
-
-
-
 
 app.patch('/equipment/status/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
@@ -349,9 +353,6 @@ app.patch('/equipment/status/:id', verifyToken, verifyAdmin, async (req, res) =>
     res.status(500).send({ message: 'Failed to update equipment status' });
   }
 });
-
-
-
 
 app.patch('/equipment/:id', verifyToken, async (req, res) => {
   try {
@@ -370,9 +371,6 @@ app.patch('/equipment/:id', verifyToken, async (req, res) => {
   }
 });
 
-
-
-
 app.delete('/equipment/:id', verifyToken, async (req, res) => {
   try {
     const item = await Equipment.findById(req.params.id);
@@ -390,9 +388,7 @@ app.delete('/equipment/:id', verifyToken, async (req, res) => {
   }
 });
 
-
-
-
+// ================= FAVORITES ROUTES =================
 
 app.get('/favorites', verifyToken, verifyRenter, async (req, res) => {
   try {
@@ -403,15 +399,11 @@ app.get('/favorites', verifyToken, verifyRenter, async (req, res) => {
   }
 });
 
-
-
-
-
 app.post('/favorites/:equipmentId', verifyToken, verifyRenter, async (req, res) => {
   try {
     const user = await User.findByIdAndUpdate(
       req.user.userId,
-      { $addToSet: { favorites: req.params.equipmentId } }, // prevents duplicates
+      { $addToSet: { favorites: req.params.equipmentId } },
       { new: true }
     ).populate('favorites');
     res.send(user.favorites);
@@ -419,9 +411,6 @@ app.post('/favorites/:equipmentId', verifyToken, verifyRenter, async (req, res) 
     res.status(500).send({ message: 'Failed to add to favorites' });
   }
 });
-
-
-
 
 app.delete('/favorites/:equipmentId', verifyToken, verifyRenter, async (req, res) => {
   try {
@@ -436,9 +425,7 @@ app.delete('/favorites/:equipmentId', verifyToken, verifyRenter, async (req, res
   }
 });
 
-
-
-
+// ================= BOOKINGS & STRIPE PAYMENT ROUTES =================
 
 const calculateTotalAmount = (price, rentalType, startDate, endDate, quantity) => {
   const start = new Date(startDate);
@@ -446,20 +433,17 @@ const calculateTotalAmount = (price, rentalType, startDate, endDate, quantity) =
   const diffTime = Math.max(1, end - start);
   const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-  let units = days; // default: Daily
+  let units = days;
   if (rentalType === 'Weekly') units = Math.ceil(days / 7);
   if (rentalType === 'Monthly') units = Math.ceil(days / 30);
 
   return Math.max(1, units) * price * quantity;
 };
 
-
-
 app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
   try {
     const { equipmentId, startDate, endDate, quantity, contactNumber, address, notes } = req.body;
 
-    // 1. Check equipment & availability
     const equipment = await Equipment.findById(equipmentId);
     if (!equipment || equipment.status !== 'Approved') {
       return res.status(404).send({ message: 'Equipment not available' });
@@ -468,7 +452,6 @@ app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
       return res.status(400).send({ message: `Only ${equipment.quantity} unit(s) available` });
     }
 
-    // 2. Calculate total amount
     const totalAmount = calculateTotalAmount(
       equipment.price,
       equipment.rentalType,
@@ -477,7 +460,6 @@ app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
       Number(quantity)
     );
 
-    // 3. Create Pending Booking
     const booking = await Booking.create({
       equipment: equipment._id,
       customer: req.user.userId,
@@ -493,7 +475,6 @@ app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
       bookingStatus: 'Pending',
     });
 
-    // 4. Create Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       customer_email: req.user.email,
@@ -516,18 +497,16 @@ app.post('/bookings/checkout', verifyToken, verifyRenter, async (req, res) => {
         equipmentId: equipment._id.toString(),
         customerId: req.user.userId.toString(),
       },
-      success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.CLIENT_URL}/equipment/${equipment._id}?canceled=true`,
+      success_url: `${clientUrl}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${clientUrl}/equipment/${equipment._id}?canceled=true`,
     });
 
     res.send({ url: session.url, bookingId: booking._id });
-  }  catch (error) {
-    console.error("❌ Stripe Checkout Error:", error.message);
+  } catch (error) {
+    console.error('❌ Stripe Checkout Error:', error.message);
     res.status(500).send({ message: error.message || 'Checkout failed' });
   }
 });
-
-
 
 app.post('/payments/confirm', verifyToken, async (req, res) => {
   try {
@@ -541,28 +520,24 @@ app.post('/payments/confirm', verifyToken, async (req, res) => {
     const { bookingId, equipmentId, customerId } = session.metadata;
     const transactionId = session.payment_intent || session.id;
 
-    // Prevent duplicate payment records on page reload
     const existingPayment = await Payment.findOne({ transactionId });
     if (existingPayment) {
       const booking = await Booking.findById(bookingId).populate('equipment', 'name image');
       return res.send({ success: true, payment: existingPayment, booking });
     }
 
-    // 1. Update Booking status
     const booking = await Booking.findByIdAndUpdate(
       bookingId,
       { paymentStatus: 'Paid', bookingStatus: 'Confirmed' },
       { new: true }
     ).populate('equipment', 'name image');
 
-    // 2. Reduce available equipment quantity
     if (booking) {
       await Equipment.findByIdAndUpdate(equipmentId, {
         $inc: { quantity: -booking.quantity },
       });
     }
 
-    // 3. Save Payment record
     const payment = await Payment.create({
       bookingId,
       transactionId,
@@ -576,9 +551,6 @@ app.post('/payments/confirm', verifyToken, async (req, res) => {
   }
 });
 
-
-
-
 app.get('/bookings/customer', verifyToken, verifyRenter, async (req, res) => {
   try {
     const bookings = await Booking.find({ customer: req.user.userId })
@@ -589,9 +561,6 @@ app.get('/bookings/customer', verifyToken, verifyRenter, async (req, res) => {
     res.status(500).send({ message: 'Failed to fetch customer rentals' });
   }
 });
-
-
-
 
 app.get('/bookings/owner', verifyToken, verifyOwner, async (req, res) => {
   try {
@@ -605,9 +574,6 @@ app.get('/bookings/owner', verifyToken, verifyOwner, async (req, res) => {
   }
 });
 
-
-
-
 app.get('/bookings/admin', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const bookings = await Booking.find()
@@ -620,9 +586,6 @@ app.get('/bookings/admin', verifyToken, verifyAdmin, async (req, res) => {
     res.status(500).send({ message: 'Failed to fetch all rentals' });
   }
 });
-
-
-
 
 app.patch('/bookings/status/:id', verifyToken, async (req, res) => {
   try {
@@ -643,9 +606,7 @@ app.patch('/bookings/status/:id', verifyToken, async (req, res) => {
   }
 });
 
-
-
-
+// ================= ANALYTICS ROUTES =================
 
 app.get('/analytics/admin', verifyToken, verifyAdmin, async (req, res) => {
   try {
@@ -702,8 +663,6 @@ app.get('/analytics/admin', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
-
-
 app.get('/analytics/owner', verifyToken, verifyOwner, async (req, res) => {
   try {
     const ownerObjectId = new mongoose.Types.ObjectId(req.user.userId);
@@ -754,10 +713,11 @@ app.get('/analytics/owner', verifyToken, verifyOwner, async (req, res) => {
   }
 });
 
-
 // Default Route
 app.get('/', (req, res) => res.send('Equipment Rental Server is Running...'));
 
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+if (!process.env.VERCEL) {
+  app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+}
 
-export default app; // Exporting for testing purposes
+module.exports = app;
