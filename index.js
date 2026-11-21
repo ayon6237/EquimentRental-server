@@ -759,3 +759,5 @@ app.get('/analytics/owner', verifyToken, verifyOwner, async (req, res) => {
 app.get('/', (req, res) => res.send('Equipment Rental Server is Running...'));
 
 app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+
+export default app; // Exporting for testing purposes
